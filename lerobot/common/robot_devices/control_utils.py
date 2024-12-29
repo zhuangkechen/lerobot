@@ -198,7 +198,6 @@ def init_policy(pretrained_policy_name_or_path, policy_overrides):
 
 def warmup_record(
     robot,
-    viewer,
     events,
     enable_teleoperation,
     warmup_time_s,
@@ -207,7 +206,6 @@ def warmup_record(
 ):
     control_loop(
         robot=robot,
-        viewer=viewer,
         control_time_s=warmup_time_s,
         display_cameras=display_cameras,
         events=events,
@@ -218,7 +216,6 @@ def warmup_record(
 
 def record_episode(
     robot,
-    viewer,
     dataset,
     events,
     episode_time_s,
@@ -230,7 +227,6 @@ def record_episode(
 ):
     control_loop(
         robot=robot,
-        viewer=viewer,
         control_time_s=episode_time_s,
         display_cameras=display_cameras,
         dataset=dataset,
@@ -246,7 +242,6 @@ def record_episode(
 @safe_stop_image_writer
 def control_loop(
     robot,
-    viewer,
     control_time_s=None,
     teleoperate=False,
     display_cameras=False,
@@ -290,7 +285,6 @@ def control_loop(
                 action = robot.send_action(pred_action)
                 action = {"action": action}
 
-        viewer.sync()
 
         if dataset is not None:
             frame = {**observation, **action}

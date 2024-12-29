@@ -693,11 +693,16 @@ class ManipulatorRobot:
 class ControllerType(Enum):
     PS5 = "ps5"
     XBOX = "xbox"
+    KEY = "keyboard"
 
 @dataclass
 class ControllerConfig:
     resolution: dict
     scale: dict
+
+
+# manager = multiprocessing.Manager()
+
 
 class JoystickExpert:
     """
@@ -749,40 +754,101 @@ class JoystickExpert:
                 'ABS_HAT0X': 0.03,
             }
         ),
+        ControllerType.KEY: ControllerConfig(
+            # KEY keyboard use wasd and jkl,
+            resolution={
+                'KEY_LEFT': 2**8,
+                'KEY_RIGHT': 2**8,
+                'KEY_UP': 2**8,
+                'KEY_DOWN': 2**8,
+                'KEY_W': 2**8,
+                'KEY_S': 2**8,
+                'KEY_A': 2**8,
+                'KEY_RESERVED': 2**8,
+                'KEY_J': 2**8,
+                'KEY_L': 2**8,
+                'KEY_I': 2**8,
+                'KEY_K': 2**8,
+            },
+            scale={
+                'KEY_LEFT': 1,
+                'KEY_RIGHT': -1,
+                'KEY_UP': 1,
+                'KEY_DOWN': -1,
+                'KEY_W': 1,
+                'KEY_S': -1,
+                'KEY_A': 1,
+                'KEY_RESERVED': -1,
+                'KEY_J': 1,
+                'KEY_L': -1,
+                'KEY_I': 1,
+                'KEY_K': -1,
+            }
+        ),
     }
 
-    def __init__(self, controller_type=ControllerType.XBOX):
+    def __init__(self, shared_dict, controller_type=ControllerType.KEY):
         self.controller_type = controller_type
         self.controller_config = self.CONTROLLER_CONFIGS[controller_type]
 
         # Manager to handle shared state between processes
-        self.manager = multiprocessing.Manager()
-        self.latest_data = self.manager.dict()
-        self.latest_data["action"] = [0.0] * 3
+        # self.manager = multiprocessing.Manager()
+        # self.latest_data = self.manager.dict()
+        self.latest_data = shared_dict
+        self.latest_data["action"] = [0.0] * 6
         self.latest_data["buttons"] = [0.0]
-
+        print(self.latest_data)
         # Start a process to continuously read Joystick state
         self.process = multiprocessing.Process(target=self._read_joystick)
-        self.process.daemon = True
+        self.process.daemon = False
         self.process.start()
+    
+    # def __getstate__(self):
+    #     state = self.__dict__.copy()
+    #     del state['latest_data']
+    #     return state
+
+    # def __setstate__(self, state):
+    #     self.__dict__.update(state)
+    #     self.latest_data = self.manager.dict()
 
 
     def _read_joystick(self):        
-        action = [0.0] * 3
+        action = [0.0] * 6
         buttons = [0.0]
         
         while True:
             try:
                 # Get fresh events
-                events = inputs.get_gamepad()
-          
+                if self.controller_type == ControllerType.KEY:
+                    events = inputs.get_key()
+                else:
+                    events = inputs.get_gamepad()
                 # Process events
                 for event in events:
                     if event.code in self.controller_config.resolution:
                         # Calculate relative changes based on the axis
                         # Normalize the joystick input values to range [-1, 1] expected by the environment
                         resolution = self.controller_config.resolution[event.code]
-                        if self.controller_type == ControllerType.PS5:
+                        if self.controller_type == ControllerType.KEY:
+                            normalized_value = event.state / (resolution / 2**8)
+                            scaled_value = normalized_value * self.controller_config.scale[event.code]
+                            #
+                            if event.code in ['KEY_LEFT', 'KEY_RIGHT']:
+                                action[0] = scaled_value
+                            elif event.code in ['KEY_UP', 'KEY_DOWN']:
+                                action[1] = scaled_value
+                            elif event.code in ['KEY_W', 'KEY_S']:
+                                action[2] = scaled_value
+                            elif event.code in ['KEY_A', 'KEY_RESERVED']:
+                                action[3] = scaled_value
+                            elif event.code in ['KEY_J', 'KEY_L']:
+                                action[4] = scaled_value
+                            elif event.code in ['KEY_I', 'KEY_K']:
+                                action[5] = scaled_value
+                            print(action)
+                            #
+                        elif self.controller_type == ControllerType.PS5:
                             normalized_value = (event.state - (resolution / 2)) / (resolution / 2)
                         else:
                             normalized_value = event.state / (resolution / 2)
@@ -821,11 +887,12 @@ class SimManipulatorRobot(ManipulatorRobot):
         self,
         config: ManipulatorRobotConfig | None = None,
         calibration_dir: Path = ".cache/calibration/koch",
-        controller_type=ControllerType.XBOX,
+        controller_type=ControllerType.KEY,
         **kwargs,
     ):
         super().__init__(config, calibration_dir, **kwargs)
-        self.expert = JoystickExpert(controller_type=controller_type)
+        manager = multiprocessing.Manager()
+        self.expert = JoystickExpert(shared_dict=manager.dict(),controller_type=controller_type)
         self._action_scale = np.array([0.05, 1])
         self.bounds = np.asarray([[-0.1, 0.015, 0.0], [0.1, 0.2, 0.2]])
         self.cube_low = np.array([-0.2 / 2, 0.015, .0055])
@@ -970,51 +1037,87 @@ class SimManipulatorRobot(ManipulatorRobot):
         # Get joystick action
         try:
             action, buttons = self.expert.get_action()
-            # print(f"Got joystick action: {action}, buttons: {buttons}")  # Debug print
+            print(f"Got joystick action: {action}, buttons: {buttons}")  # Debug print
         except Exception as e:
             print(f"Error getting joystick action: {e}")  # Debug print
             raise
-       
-        # Update follower arm positions through inverse kinematics
-        follower_pos = {}
-        for name in self.follower_arms:
-            before_lread_t = time.perf_counter()
-            
-            deadzone = 0.001
-            if np.linalg.norm(action) < deadzone:
-                action = np.zeros_like(action)
+        
+        if self.expert.controller_type==ControllerType.KEY:
+            # Send goal position to the follower
+            follower_pos = {}
+            for name in self.follower_arms:
+                before_fwrite_t = time.perf_counter()
+                
+                # #
+                # deadzone = 0.001
+                # if np.linalg.norm(action) < deadzone:
+                #     action = np.zeros_like(action)
 
-            x, y, z = action
-            grasp = buttons[0]
+                pos = self.follower_arms[name].read("Present_Position")
+                print(pos)
+                print(np.asarray(action))
+                # self.logs[f"read_follower_{name}_pos_dt_s"] = time.perf_counter() - before_lread_t
+                dpos = np.asarray(action) * self._action_scale[1] * 3
+                # npos = np.clip(pos + dpos, *self.bounds)
+                npos = pos + dpos
+                print(npos)
+                goal_pos = npos
 
-            # Set the mocap position.
-            pos = self.follower_arms[name].data.mocap_pos[0].copy()
-            dpos = np.asarray([x, y, z]) * self._action_scale[0]
-            npos = np.clip(pos + dpos, *self.bounds)
-            self.follower_arms[name].data.mocap_pos[0] = npos
+                # Cap goal position when too far away from present position.
+                # Slower fps expected due to reading from the follower.
+                if self.config.max_relative_target is not None:
+                    present_pos = self.follower_arms[name].read("Present_Position")
+                    present_pos = torch.from_numpy(present_pos)
+                    goal_pos = ensure_safe_goal_position(goal_pos, present_pos, self.config.max_relative_target)
 
-            # Set gripper grasp.
-            g = self.follower_arms[name].data.ctrl[5]
-            dg = grasp * self._action_scale[1]
-            ng = np.clip(g + dg, -2.3, 0.032)
-            self.follower_arms[name].data.ctrl[5] = ng
+                # Used when record_data=True
+                follower_pos[name] = goal_pos
 
-            tau = self.mink_solve_ik(
-                self.follower_arms[name].model,
-                self.follower_arms[name].data,
-            )
+                # goal_pos = goal_pos.astype(np.int32)
+                self.follower_arms[name].write("Goal_Position", goal_pos)
+                self.logs[f"write_follower_{name}_goal_pos_dt_s"] = time.perf_counter() - before_fwrite_t
 
-            for _ in range(20):
-                # Set the target position
-                self.follower_arms[name].data.ctrl[:4] = tau
+        if self.expert.controller_type==ControllerType.XBOX:
+            # Update follower arm positions through inverse kinematics
+            follower_pos = {}
+            for name in self.follower_arms:
+                before_lread_t = time.perf_counter()
+                
+                deadzone = 0.001
+                if np.linalg.norm(action) < deadzone:
+                    action = np.zeros_like(action)
 
-                # Step the simulation forward
-                mujoco.mj_step(self.follower_arms[name].model, self.follower_arms[name].data)
+                x, y, z = action
+                grasp = buttons[0]
 
-            # Combine all joint positions
-            follower_pos[name] = self.follower_arms[name].data.qpos[:6].copy()
-            
-            self.logs[f"read_follower_{name}_pos_dt_s"] = time.perf_counter() - before_lread_t
+                # Set the mocap position.
+                pos = self.follower_arms[name].data.mocap_pos[0].copy()
+                dpos = np.asarray([x, y, z]) * self._action_scale[0]
+                npos = np.clip(pos + dpos, *self.bounds)
+                self.follower_arms[name].data.mocap_pos[0] = npos
+
+                # Set gripper grasp.
+                g = self.follower_arms[name].data.ctrl[5]
+                dg = grasp * self._action_scale[1]
+                ng = np.clip(g + dg, -2.3, 0.032)
+                self.follower_arms[name].data.ctrl[5] = ng
+
+                tau = self.mink_solve_ik(
+                    self.follower_arms[name].model,
+                    self.follower_arms[name].data,
+                )
+
+                for _ in range(20):
+                    # Set the target position
+                    self.follower_arms[name].data.ctrl[:4] = tau
+
+                    # Step the simulation forward
+                    mujoco.mj_step(self.follower_arms[name].model, self.follower_arms[name].data)
+
+                # Combine all joint positions
+                follower_pos[name] = self.follower_arms[name].data.qpos[:6].copy()
+                
+                self.logs[f"read_follower_{name}_pos_dt_s"] = time.perf_counter() - before_lread_t
 
         if not record_data:
             return
